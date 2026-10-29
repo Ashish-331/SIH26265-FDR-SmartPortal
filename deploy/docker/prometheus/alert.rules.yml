@@ -1,0 +1,58 @@
+groups:
+  - name: aicte_fdr_system_alerts
+    rules:
+      # 1. Service Availability Alerts
+      - alert: FDRCoreServiceDown
+        expr: up{job="fdr-service"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          tier: core
+        annotations:
+          summary: "AICTE FDR Core Service is down"
+          description: "fdr-service container on {{ $labels.instance }} has been unreachable for more than 1 minute."
+          runbook_url: "https://wiki.aicte-india.org/devops/runbooks/fdr-service-down"
+
+      - alert: BankGatewayAdapterDown
+        expr: up{job="bank-gateway"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          tier: integration
+        annotations:
+          summary: "Bank CBS Gateway Adapter is offline"
+          description: "bank-gateway cannot reach commercial bank core adapters or mock CBS."
+          runbook_url: "https://wiki.aicte-india.org/devops/runbooks/bank-gateway-offline"
+
+      - alert: AuditLedgerTamperDetected
+        expr: aicte_audit_ledger_status == 0 or aicte_audit_tamper_alerts_total > 0
+        for: 0m
+        labels:
+          severity: disaster
+          tier: security
+        annotations:
+          summary: "CRITICAL: FDR Cryptographic Ledger Tampering Detected!"
+          description: "Merkle root or SHA-256 parent hash chain integrity check failed! An unauthorized database alteration has occurred."
+          runbook_url: "https://wiki.aicte-india.org/devops/runbooks/audit-chain-tamper"
+
+      - alert: HighFraudDetectionRate
+        expr: rate(aicte_ocr_fraud_flagged_total[15m]) > 0.1
+        for: 5m
+        labels:
+          severity: warning
+          tier: ocr
+        annotations:
+          summary: "Elevated FDR Document Forgery Flag Rate"
+          description: "More than 10% of uploaded FDR documents in the last 15 minutes were flagged with forensic font/digit tampering."
+          runbook_url: "https://wiki.aicte-india.org/devops/runbooks/fraud-spike"
+
+      - alert: HighSubmissionLatency
+        expr: aicte_fdr_uptime_seconds > 0 and rate(aicte_fdr_transitions_total[5m]) > 50
+        for: 2m
+        labels:
+          severity: warning
+          tier: performance
+        annotations:
+          summary: "FDR State Transition Spike / Potential Bottleneck"
+          description: "Processing rate of FDR transitions exceeded 50 ops/sec."
+          runbook_url: "https://wiki.aicte-india.org/devops/runbooks/latency-tuning"

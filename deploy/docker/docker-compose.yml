@@ -1,0 +1,281 @@
+version: '3.8'
+
+networks:
+  aicte-net:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.28.0.0/16
+
+volumes:
+  postgres_data:
+    name: aicte_fdr_postgres_data
+  redis_data:
+    name: aicte_fdr_redis_data
+  minio_data:
+    name: aicte_fdr_minio_data
+  prometheus_data:
+    name: aicte_fdr_prometheus_data
+  grafana_data:
+    name: aicte_fdr_grafana_data
+
+services:
+  # =============================================================================
+  # 1. POSTGRESQL 16 RELATIONAL STORE
+  # =============================================================================
+  postgres:
+    image: postgres:16-alpine
+    container_name: aicte-fdr-postgres
+    restart: always
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-aicte_fdr_db}
+      POSTGRES_USER: ${POSTGRES_USER:-aicte_admin}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aicte_secure_pwd_2026}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ../../docs/04_DATABASE_SCHEMA_AND_MODELS.sql:/docker-entrypoint-initdb.d/01_init.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - aicte-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
+  # =============================================================================
+  # 2. REDIS 7.2 HIGH-SPEED CACHE & DISTRIBUTED LOCKS
+  # =============================================================================
+  redis:
+    image: redis:7.2-alpine
+    container_name: aicte-fdr-redis
+    restart: always
+    command: ["redis-server", "--requirepass", "${REDIS_PASSWORD:-aicte_redis_pwd_2026}", "--appendonly", "yes"]
+    volumes:
+      - redis_data:/data
+    ports:
+      - "6379:6379"
+    networks:
+      - aicte-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD:-aicte_redis_pwd_2026}", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # =============================================================================
+  # 3. APACHE KAFKA 3.6 (KRAFT MODE) EVENT BROKER
+  # =============================================================================
+  kafka:
+    image: bashj79/kafka-kraft:3.6.0
+    container_name: aicte-fdr-kafka
+    restart: always
+    environment:
+      KAFKA_NODE_ID: 1
+      KAFKA_PROCESS_ROLES: 'broker,controller'
+      KAFKA_CONTROLLER_QUORUM_VOTERS: '1@kafka:9093'
+      KAFKA_LISTENERS: 'PLAINTEXT://:9092,CONTROLLER://:9093'
+      KAFKA_ADVERTISED_LISTENERS: 'PLAINTEXT://kafka:9092'
+      KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: 'CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT'
+      KAFKA_CONTROLLER_LISTENER_NAMES: 'CONTROLLER'
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+      KAFKA_AUTO_CREATE_TOPICS_ENABLE: 'true'
+    ports:
+      - "9092:9092"
+    networks:
+      - aicte-net
+
+  # =============================================================================
+  # 4. MINIO S3 OBJECT STORAGE (FDR PDF DOCUMENTS & CERTIFICATES)
+  # =============================================================================
+  minio:
+    image: minio/minio:RELEASE.2024-01-18T22-51-28Z
+    container_name: aicte-fdr-minio
+    restart: always
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-aicte_s3_admin}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-aicte_s3_secret_2026}
+    volumes:
+      - minio_data:/data
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    networks:
+      - aicte-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  minio-init:
+    image: minio/mc:RELEASE.2024-01-16T16-06-34Z
+    container_name: aicte-fdr-minio-init
+    depends_on:
+      minio:
+        condition: service_healthy
+    networks:
+      - aicte-net
+    entrypoint: >
+      /bin/sh -c "
+      /usr/bin/mc alias set myminio http://minio:9000 ${MINIO_ROOT_USER:-aicte_s3_admin} ${MINIO_ROOT_PASSWORD:-aicte_s3_secret_2026};
+      /usr/bin/mc mb --ignore-existing myminio/aicte-fdr-documents;
+      /usr/bin/mc anonymous set download myminio/aicte-fdr-documents;
+      exit 0;
+      "
+
+  # =============================================================================
+  # 5. CORE FDR LIFECYCLE SERVICE
+  # =============================================================================
+  fdr-service:
+    build:
+      context: ../../src/fdr-service
+      dockerfile: Dockerfile
+    container_name: aicte-fdr-core-service
+    restart: always
+    environment:
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aicte_admin}:${POSTGRES_PASSWORD:-aicte_secure_pwd_2026}@postgres:5432/${POSTGRES_DB:-aicte_fdr_db}
+      REDIS_HOST: redis
+      REDIS_PORT: 6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD:-aicte_redis_pwd_2026}
+      KAFKA_BROKERS: kafka:9092
+      MINIO_ENDPOINT: http://minio:9000
+      MINIO_ACCESS_KEY: ${MINIO_ROOT_USER:-aicte_s3_admin}
+      MINIO_SECRET_KEY: ${MINIO_ROOT_PASSWORD:-aicte_s3_secret_2026}
+      MINIO_BUCKET_NAME: aicte-fdr-documents
+      BANK_GATEWAY_URL: http://bank-gateway:8001
+      OCR_SERVICE_URL: http://ocr-service:8002
+      AUDIT_SERVICE_URL: http://audit-service:8003
+    ports:
+      - "8000:8000"
+    networks:
+      - aicte-net
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+      audit-service:
+        condition: service_started
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  # =============================================================================
+  # 6. BANK GATEWAY & CBS ADAPTER
+  # =============================================================================
+  bank-gateway:
+    build:
+      context: ../../src/bank-gateway
+      dockerfile: Dockerfile
+    container_name: aicte-fdr-bank-gateway
+    restart: always
+    environment:
+      PORT: 8001
+      CBS_TIMEOUT_SECONDS: 10
+      MOCK_MODE: "true"
+    ports:
+      - "8001:8001"
+    networks:
+      - aicte-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8001/health').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # =============================================================================
+  # 7. OCR & FORENSIC FRAUD DETECTION SERVICE
+  # =============================================================================
+  ocr-service:
+    build:
+      context: ../../src/ocr-service
+      dockerfile: Dockerfile
+    container_name: aicte-fdr-ocr-service
+    restart: always
+    environment:
+      PORT: 8002
+      OCR_CONFIDENCE_THRESHOLD: 0.85
+      FRAUD_SCORE_ALERT_THRESHOLD: 50.0
+    ports:
+      - "8002:8002"
+    networks:
+      - aicte-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8002/health').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # =============================================================================
+  # 8. AUDIT & MERKLE LEDGER SERVICE
+  # =============================================================================
+  audit-service:
+    build:
+      context: ../../src/audit-service
+      dockerfile: Dockerfile
+    container_name: aicte-fdr-audit-service
+    restart: always
+    environment:
+      PORT: 8003
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aicte_admin}:${POSTGRES_PASSWORD:-aicte_secure_pwd_2026}@postgres:5432/${POSTGRES_DB:-aicte_fdr_db}
+    ports:
+      - "8003:8003"
+    networks:
+      - aicte-net
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8003/health').read()"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+
+  # =============================================================================
+  # 9. PROMETHEUS MONITORING & ALERTING
+  # =============================================================================
+  prometheus:
+    image: prom/prometheus:v2.49.1
+    container_name: aicte-fdr-prometheus
+    restart: always
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+    ports:
+      - "9090:9090"
+    networks:
+      - aicte-net
+
+  # =============================================================================
+  # 10. GRAFANA OPERATIONAL METRICS DASHBOARD
+  # =============================================================================
+  grafana:
+    image: grafana/grafana:10.3.1
+    container_name: aicte-fdr-grafana
+    restart: always
+    environment:
+      - GF_SECURITY_ADMIN_USER=admin
+      - GF_SECURITY_ADMIN_PASSWORD=admin
+      - GF_USERS_ALLOW_SIGN_UP=false
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - grafana_data:/var/lib/grafana
+    ports:
+      - "3000:3000"
+    networks:
+      - aicte-net
+    depends_on:
+      - prometheus

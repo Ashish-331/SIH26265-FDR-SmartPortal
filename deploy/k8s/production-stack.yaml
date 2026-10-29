@@ -1,0 +1,702 @@
+# =============================================================================
+# SIH Problem Statement 26265: AICTE Security Deposit / FDR Portal
+# Production Kubernetes Deployment Manifests
+# File: deploy/k8s/production-stack.yaml
+# =============================================================================
+
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: aicte-fdr-prod
+  labels:
+    environment: production
+    app.kubernetes.io/part-of: aicte-fdr-portal
+
+---
+# =============================================================================
+# CONFIGMAP: SHARED ENVIRONMENT VARIABLES
+# =============================================================================
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aicte-fdr-config
+  namespace: aicte-fdr-prod
+data:
+  ENVIRONMENT: "production"
+  LOG_LEVEL: "info"
+  TZ: "Asia/Kolkata"
+  BANK_GATEWAY_URL: "http://bank-gateway-svc:8001"
+  OCR_SERVICE_URL: "http://ocr-service-svc:8002"
+  AUDIT_SERVICE_URL: "http://audit-service-svc:8003"
+  MINIO_ENDPOINT: "http://minio-svc:9000"
+  MINIO_BUCKET_NAME: "aicte-fdr-documents"
+  KAFKA_BROKERS: "kafka-svc:9092"
+  OCR_CONFIDENCE_THRESHOLD: "0.85"
+  FRAUD_RISK_ALERT_THRESHOLD: "50.0"
+
+---
+# =============================================================================
+# SECRET: CREDENTIALS & SENSITIVE KEYS
+# =============================================================================
+apiVersion: v1
+kind: Secret
+metadata:
+  name: aicte-fdr-secrets
+  namespace: aicte-fdr-prod
+type: Opaque
+stringData:
+  DATABASE_URL: "postgresql://aicte_admin:aicte_secure_prod_pwd_2026@postgres-svc:5432/aicte_fdr_db"
+  REDIS_PASSWORD: "aicte_redis_secure_prod_2026"
+  MINIO_ACCESS_KEY: "aicte_s3_admin"
+  MINIO_SECRET_KEY: "aicte_s3_secret_prod_2026"
+  JWT_SECRET: "k8s_prod_jwt_signing_key_aicte_security_deposit_portal_2026_super_secure"
+  FIELD_ENCRYPTION_KEY: "YTFjMmUzZDQ1NmI3OGExYzJlM2Q0NTZiNzhhMWMyZTM="
+
+---
+# =============================================================================
+# 1. CORE FDR SERVICE (DEPLOYMENT & SERVICE)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: fdr-service
+  namespace: aicte-fdr-prod
+  labels:
+    app: fdr-service
+    access-db: "true"
+    role: core-api
+spec:
+  replicas: 3
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: fdr-service
+  template:
+    metadata:
+      labels:
+        app: fdr-service
+        access-db: "true"
+        role: core-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: fdr-service
+          image: aicte-registry.nic.in/fdr-portal/fdr-service:v1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: aicte-fdr-config
+            - secretRef:
+                name: aicte-fdr-secrets
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          resources:
+            requests:
+              cpu: "250m"
+              memory: "512Mi"
+            limits:
+              cpu: "1000m"
+              memory: "1024Mi"
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+          startupProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 6
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            periodSeconds: 5
+            timeoutSeconds: 2
+            successThreshold: 1
+            failureThreshold: 2
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: fdr-service-svc
+  namespace: aicte-fdr-prod
+  labels:
+    app: fdr-service
+spec:
+  type: ClusterIP
+  selector:
+    app: fdr-service
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+
+---
+# =============================================================================
+# 2. BANK CBS GATEWAY ADAPTER (DEPLOYMENT & SERVICE)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: bank-gateway
+  namespace: aicte-fdr-prod
+  labels:
+    app: bank-gateway
+    role: bank-adapter
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: bank-gateway
+  template:
+    metadata:
+      labels:
+        app: bank-gateway
+        role: bank-adapter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: bank-gateway
+          image: aicte-registry.nic.in/fdr-portal/bank-gateway:v1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: aicte-fdr-config
+            - secretRef:
+                name: aicte-fdr-secrets
+          ports:
+            - name: http
+              containerPort: 8001
+          resources:
+            requests:
+              cpu: "150m"
+              memory: "256Mi"
+            limits:
+              cpu: "500m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8001
+            periodSeconds: 5
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: bank-gateway-svc
+  namespace: aicte-fdr-prod
+  labels:
+    app: bank-gateway
+spec:
+  type: ClusterIP
+  selector:
+    app: bank-gateway
+  ports:
+    - name: http
+      port: 8001
+      targetPort: 8001
+
+---
+# =============================================================================
+# 3. OCR & FORENSIC FRAUD WORKER (DEPLOYMENT & SERVICE)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ocr-service
+  namespace: aicte-fdr-prod
+  labels:
+    app: ocr-service
+    role: ocr-pipeline
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: ocr-service
+  template:
+    metadata:
+      labels:
+        app: ocr-service
+        role: ocr-pipeline
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8002"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: ocr-service
+          image: aicte-registry.nic.in/fdr-portal/ocr-service:v1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: aicte-fdr-config
+            - secretRef:
+                name: aicte-fdr-secrets
+          ports:
+            - name: http
+              containerPort: 8002
+          resources:
+            requests:
+              cpu: "500m"
+              memory: "1024Mi"
+            limits:
+              cpu: "2000m"
+              memory: "2048Mi"
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8002
+            periodSeconds: 20
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8002
+            periodSeconds: 5
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ocr-service-svc
+  namespace: aicte-fdr-prod
+  labels:
+    app: ocr-service
+spec:
+  type: ClusterIP
+  selector:
+    app: ocr-service
+  ports:
+    - name: http
+      port: 8002
+      targetPort: 8002
+
+---
+# =============================================================================
+# 4. AUDIT & MERKLE LEDGER SERVICE (DEPLOYMENT & SERVICE)
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: audit-service
+  namespace: aicte-fdr-prod
+  labels:
+    app: audit-service
+    access-db: "true"
+    role: audit-ledger
+spec:
+  replicas: 2
+  strategy:
+    type: RollingUpdate
+  selector:
+    matchLabels:
+      app: audit-service
+  template:
+    metadata:
+      labels:
+        app: audit-service
+        access-db: "true"
+        role: audit-ledger
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8003"
+        prometheus.io/path: "/metrics"
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: audit-service
+          image: aicte-registry.nic.in/fdr-portal/audit-service:v1.0.0
+          imagePullPolicy: IfNotPresent
+          securityContext:
+            readOnlyRootFilesystem: true
+            allowPrivilegeEscalation: false
+            capabilities:
+              drop:
+                - ALL
+          envFrom:
+            - configMapRef:
+                name: aicte-fdr-config
+            - secretRef:
+                name: aicte-fdr-secrets
+          ports:
+            - name: http
+              containerPort: 8003
+          resources:
+            requests:
+              cpu: "200m"
+              memory: "256Mi"
+            limits:
+              cpu: "800m"
+              memory: "512Mi"
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            periodSeconds: 15
+            timeoutSeconds: 3
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8003
+            periodSeconds: 5
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: audit-service-svc
+  namespace: aicte-fdr-prod
+  labels:
+    app: audit-service
+spec:
+  type: ClusterIP
+  selector:
+    app: audit-service
+  ports:
+    - name: http
+      port: 8003
+      targetPort: 8003
+
+---
+# =============================================================================
+# 5. HORIZONTAL POD AUTOSCALERS (HPA)
+# =============================================================================
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: fdr-service-hpa
+  namespace: aicte-fdr-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: fdr-service
+  minReplicas: 3
+  maxReplicas: 15
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: ocr-service-hpa
+  namespace: aicte-fdr-prod
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: ocr-service
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 80
+
+---
+# =============================================================================
+# 6. INGRESS WITH TLS & RATE LIMITING
+# =============================================================================
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: aicte-fdr-ingress
+  namespace: aicte-fdr-prod
+  annotations:
+    kubernetes.io/ingress.class: "nginx"
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/proxy-body-size: "25m"
+    nginx.ingress.kubernetes.io/limit-rps: "50"
+    nginx.ingress.kubernetes.io/limit-connections: "20"
+    nginx.ingress.kubernetes.io/proxy-connect-timeout: "15"
+    nginx.ingress.kubernetes.io/proxy-read-timeout: "60"
+    nginx.ingress.kubernetes.io/proxy-send-timeout: "60"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  tls:
+    - hosts:
+        - fdr.aicte-india.org
+      secretName: aicte-tls-cert
+  rules:
+    - host: fdr.aicte-india.org
+      http:
+        paths:
+          - path: /api/v1/fdr
+            pathType: Prefix
+            backend:
+              service:
+                name: fdr-service-svc
+                port:
+                  number: 8000
+          - path: /api/v1/audit
+            pathType: Prefix
+            backend:
+              service:
+                name: audit-service-svc
+                port:
+                  number: 8003
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: fdr-service-svc
+                port:
+                  number: 8000
+
+---
+# =============================================================================
+# 7. NETWORK POLICIES (ZERO TRUST INGRESS & STRICT EGRESS)
+# =============================================================================
+# Default deny all ingress and egress in namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-all
+  namespace: aicte-fdr-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+
+---
+# Allow DNS resolution from all pods
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-dns-resolution
+  namespace: aicte-fdr-prod
+spec:
+  podSelector: {}
+  policyTypes:
+    - Egress
+  egress:
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+
+---
+# Ingress Policy: Allow Nginx Ingress Controller to route traffic to fdr-service
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-ingress-to-fdr-service
+  namespace: aicte-fdr-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: fdr-service
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+      ports:
+        - protocol: TCP
+          port: 8000
+  egress:
+    # Allow fdr-service to talk to bank-gateway, ocr-service, audit-service
+    - to:
+        - podSelector:
+            matchLabels:
+              app: bank-gateway
+      ports:
+        - protocol: TCP
+          port: 8001
+    - to:
+        - podSelector:
+            matchLabels:
+              app: ocr-service
+      ports:
+        - protocol: TCP
+          port: 8002
+    - to:
+        - podSelector:
+            matchLabels:
+              app: audit-service
+      ports:
+        - protocol: TCP
+          port: 8003
+    # Allow fdr-service to reach PostgreSQL
+    - to:
+        - podSelector:
+            matchLabels:
+              app: postgres
+      ports:
+        - protocol: TCP
+          port: 5432
+    # Allow fdr-service to reach Redis
+    - to:
+        - podSelector:
+            matchLabels:
+              app: redis
+      ports:
+        - protocol: TCP
+          port: 6379
+    # Allow fdr-service to reach MinIO
+    - to:
+        - podSelector:
+            matchLabels:
+              app: minio
+      ports:
+        - protocol: TCP
+          port: 9000
+
+---
+# Database Isolation Policy: Only pods with label access-db=true can reach PostgreSQL
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: restrict-postgres-access
+  namespace: aicte-fdr-prod
+spec:
+  podSelector:
+    matchLabels:
+      app: postgres
+  policyTypes:
+    - Ingress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              access-db: "true"
+      ports:
+        - protocol: TCP
+          port: 5432

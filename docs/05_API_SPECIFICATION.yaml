@@ -1,0 +1,2523 @@
+openapi: 3.0.3
+info:
+  title: AICTE Smart FDR & Security Deposit Management Portal API
+  version: 1.0.0
+  description: >-
+    Authoritative RESTful API specification for the AICTE Fixed Deposit Receipt (FDR)
+    and Security Deposit Portal (Smart India Hackathon 2024 / Problem Statement 26265).
+    Provides comprehensive services for educational institutions, Scheduled Commercial Banks,
+    AICTE Regional Offices, Central Finance Bureau, and Executive Leadership.
+    Features automated OCR certificate verification, Core Banking System (CBS) integration,
+    National E-Governance Services Ltd (NeSL) lien tracking, multi-tier release workflows,
+    and cryptographically chained audit logging.
+  contact:
+    name: AICTE Portal Architecture Bureau
+    email: fdr-support@aicte-india.org
+    url: https://fdr.aicte-india.org
+  license:
+    name: Open Government Data License - India (OGDL)
+    url: https://data.gov.in/sites/default/files/Gazette_Notification_OGDL.pdf
+
+servers:
+  - url: https://fdr.aicte-india.org/api/v1
+    description: AICTE Production Gateway (National Cloud / NIC)
+  - url: https://staging-fdr.aicte-india.org/api/v1
+    description: AICTE Staging & Pre-Production Environment
+  - url: http://localhost:8080/api/v1
+    description: Local Containerized Development Environment
+
+tags:
+  - name: Authentication & Session
+    description: JWT token issuance, multi-factor authentication (MFA), and session management.
+  - name: Institution Management
+    description: AICTE technical education provider onboarding, profiling, and compliance status.
+  - name: FDR Operations
+    description: Security deposit creation, document ingestion, OCR parsing, and lifecycle updates.
+  - name: Bank Verification Gateway
+    description: Scheduled bank CBS bridge, electronic lien creation, and branch nodal sign-offs.
+  - name: Maturity & Escalation
+    description: Automated maturity horizon tracking (T-90, T-60, T-30), alert queues, and rollovers.
+  - name: Release & Clearance Workflow
+    description: 3-Tier governance workflow for institutional deposit liquidation and PFMS disbursement.
+  - name: Immutable Audit
+    description: Cryptographically verifiable SHA-256 hash-chained transactional event ledger.
+
+paths:
+  /auth/login:
+    post:
+      tags:
+        - Authentication & Session
+      summary: Authenticate User & Issue Session Token
+      description: Validates user credentials (AICTE Permanent ID or official email) and issues a short-lived JWT access token and refresh token.
+      operationId: loginUser
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Successful authentication. If MFA is enabled, returns session token requiring MFA verification.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /auth/refresh:
+    post:
+      tags:
+        - Authentication & Session
+      summary: Refresh Access Token
+      description: Exchanges an unexpired refresh token for a newly signed JWT access token.
+      operationId: refreshSessionToken
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RefreshTokenRequest'
+      responses:
+        '200':
+          description: Successfully refreshed access token.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /auth/mfa/verify:
+    post:
+      tags:
+        - Authentication & Session
+      summary: Verify Multi-Factor Authentication Challenge
+      description: Validates a 6-digit Time-based One-Time Password (TOTP) or SMS/Email OTP generated during initial login.
+      operationId: verifyMfaChallenge
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MFAVerifyRequest'
+      responses:
+        '200':
+          description: MFA challenge resolved successfully; returns full session credentials.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuthTokenResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /institutions:
+    get:
+      tags:
+        - Institution Management
+      summary: List Registered Technical Institutions
+      description: Retrieves a paginated list of AICTE-approved institutions with filtering by state, regional office, and type.
+      operationId: listInstitutions
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          description: Page number for pagination (1-indexed).
+          schema:
+            type: integer
+            default: 1
+            minimum: 1
+        - name: limit
+          in: query
+          description: Number of records per page.
+          schema:
+            type: integer
+            default: 20
+            maximum: 100
+        - name: state
+          in: query
+          description: Filter institutions by Indian State or Union Territory.
+          schema:
+            type: string
+            example: Maharashtra
+        - name: regional_office_id
+          in: query
+          description: Filter institutions by AICTE Regional Office identifier.
+          schema:
+            type: string
+            example: RO_WESTERN_MUMBAI
+        - name: institution_type
+          in: query
+          description: Filter by statutory category.
+          schema:
+            $ref: '#/components/schemas/InstitutionType'
+        - name: search
+          in: query
+          description: Search text matching institution name, AICTE Permanent ID, or Trust name.
+          schema:
+            type: string
+            example: College of Engineering
+      responses:
+        '200':
+          description: Paginated institution list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InstitutionListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags:
+        - Institution Management
+      summary: Register New Technical Institution
+      description: Creates an institutional profile in the portal. Restricted to AICTE Administrator privileges.
+      operationId: createInstitution
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstitutionCreate'
+      responses:
+        '201':
+          description: Institution successfully onboarded.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Institution'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /institutions/{id}:
+    get:
+      tags:
+        - Institution Management
+      summary: Retrieve Specific Institution Profile
+      description: Returns full institutional profile including sponsoring trust details, statutory IDs, and deposit statistics.
+      operationId: getInstitutionById
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUID of the institution.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Institution details retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Institution'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      tags:
+        - Institution Management
+      summary: Update Institution Profile
+      description: Modifies contact details, trust info, or approval state.
+      operationId: updateInstitution
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUID of the institution.
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/InstitutionUpdate'
+      responses:
+        '200':
+          description: Institution profile updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Institution'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /fdrs:
+    get:
+      tags:
+        - FDR Operations
+      summary: Search & List Fixed Deposit Receipts
+      description: Retrieves a filtered list of FDR records based on institutional ownership, bank branch, lifecycle status, and maturity horizons.
+      operationId: listFDRs
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: institution_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: bank_branch_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/FDRStatus'
+        - name: lien_status
+          in: query
+          schema:
+            $ref: '#/components/schemas/LienStatus'
+        - name: expiring_within_days
+          in: query
+          description: Filter FDRs reaching maturity within specified number of days (e.g. 90, 60, 30).
+          schema:
+            type: integer
+            example: 90
+      responses:
+        '200':
+          description: Filtered list of FDR records.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FDRListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags:
+        - FDR Operations
+      summary: Submit New Security Deposit FDR
+      description: Submits a newly created FDR record in DRAFT or SUBMITTED status pending bank verification.
+      operationId: createFDR
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FDRCreate'
+      responses:
+        '201':
+          description: FDR record created successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FDR'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /fdrs/{id}:
+    get:
+      tags:
+        - FDR Operations
+      summary: Retrieve Detailed FDR Record
+      description: Returns full FDR details including bank branch info, current interest accrual, linked documents, and lien status.
+      operationId: getFDRById
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: FDR detail retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FDR'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    put:
+      tags:
+        - FDR Operations
+      summary: Update Draft FDR Record
+      description: Updates editable fields of an FDR before bank verification lock.
+      operationId: updateFDR
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/FDRUpdate'
+      responses:
+        '200':
+          description: FDR record updated successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FDR'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /fdrs/upload-certificate:
+    post:
+      tags:
+        - FDR Operations
+      summary: Upload Digital FDR Certificate or Supporting Document
+      description: Ingests a binary file (PDF/JPEG), calculates SHA-256 checksum, stores to S3, and records entry in `fdr_documents`.
+      operationId: uploadFDRDocument
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required:
+                - fdr_id
+                - document_type
+                - file
+              properties:
+                fdr_id:
+                  type: string
+                  format: uuid
+                document_type:
+                  $ref: '#/components/schemas/DocumentType'
+                file:
+                  type: string
+                  format: binary
+                  description: Document file binary (max 50 MB).
+      responses:
+        '201':
+          description: Document uploaded and hash verified.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DocumentUploadResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /fdrs/{id}/verify-ocr:
+    post:
+      tags:
+        - FDR Operations
+      summary: Execute OCR Extraction & Forensic Tamper Analysis
+      description: Triggers optical character recognition, extracts key-value pairs (amounts, joint name, maturity date), and computes tamper score.
+      operationId: verifyFDROcr
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: UUID of the FDR.
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: OCR pipeline and forensic analysis execution complete.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/OCRVerificationResult'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '422':
+          $ref: '#/components/responses/UnprocessableEntity'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /fdrs/{id}/confirm-lien:
+    post:
+      tags:
+        - FDR Operations
+      summary: Confirm AICTE Lien Marking
+      description: AICTE Regional Officer or Admin records confirmed statutory lien notation backed by NeSL or Bank CBS acknowledgement.
+      operationId: confirmLienMarking
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LienConfirmationRequest'
+      responses:
+        '200':
+          description: Lien confirmed and FDR status transitioned to ACTIVE.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LienRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /banks/verify-fdr:
+    post:
+      tags:
+        - Bank Verification Gateway
+      summary: Query Core Banking System (CBS) for FDR Validity
+      description: Outbound/Inbound gateway call validating fixed deposit existence, balance, lock-in, and joint names against bank CBS.
+      operationId: verifyFDRWithCBS
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CBSVerificationRequest'
+      responses:
+        '200':
+          description: Core banking validation response returned.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/CBSVerificationResponse'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /banks/mark-lien:
+    post:
+      tags:
+        - Bank Verification Gateway
+      summary: Instruct CBS to Place Statutory Lien
+      description: Electronic command issued to bank gateway or NeSL utility to mark statutory lien in favor of AICTE.
+      operationId: markCBSLien
+      security:
+        - BearerAuth: []
+        - ApiKeyAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CBSMarkLienRequest'
+      responses:
+        '200':
+          description: Lien marking acknowledged by CBS.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LienRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /banks/callback/lien-status:
+    post:
+      tags:
+        - Bank Verification Gateway
+      summary: Bank CBS / NeSL Asynchronous Status Callback
+      description: Webhook endpoint invoked by scheduled banks or NeSL to confirm or update lien notation state.
+      operationId: cbsLienStatusCallback
+      security:
+        - ApiKeyAuth: []
+        - DigitalSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CBSCallbackPayload'
+      responses:
+        '200':
+          description: Callback processed successfully and state transitioned.
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: PROCESSED
+                  transaction_reference:
+                    type: string
+                    example: CBSTX-20261028-9812
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /banks/branch-nodal/sign-off:
+    post:
+      tags:
+        - Bank Verification Gateway
+      summary: Branch Nodal Officer Digital Sign-Off
+      description: Digital certificate / e-Sign by the bank branch manager affirming joint lien notation and deposit lock.
+      operationId: branchNodalSignOff
+      security:
+        - BearerAuth: []
+        - DigitalSignature: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/NodalSignOffRequest'
+      responses:
+        '200':
+          description: Digital sign-off verified and appended to lien record.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LienRecord'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /alerts/maturity-dashboard:
+    get:
+      tags:
+        - Maturity & Escalation
+      summary: Retrieve Maturity Dashboard & Alert Queues
+      description: Aggregated counts and timelines of FDRs reaching maturity (T-90, T-60, T-30, overdue) for proactive action.
+      operationId: getMaturityDashboard
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: regional_office_id
+          in: query
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Maturity metrics and upcoming alert lists retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaturityDashboardResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /alerts/{id}/ack:
+    post:
+      tags:
+        - Maturity & Escalation
+      summary: Acknowledge Maturity Notification
+      description: Regional Officer or Institution acknowledges receipt of maturity alert and designates resolution path.
+      operationId: acknowledgeAlert
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AlertAckRequest'
+      responses:
+        '200':
+          description: Alert acknowledged successfully.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/MaturityAlert'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /fdrs/{id}/initiate-rollover:
+    post:
+      tags:
+        - Maturity & Escalation
+      summary: Initiate Contractual Auto-Renewal or Rollover
+      description: Initiates roll-over of matured FDR for another lock-in cycle with accrued interest capitalization.
+      operationId: initiateRollover
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RolloverRequest'
+      responses:
+        '200':
+          description: Rollover initiated and successor FDR generated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/FDR'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /release-requests:
+    get:
+      tags:
+        - Release & Clearance Workflow
+      summary: List Release Requests
+      description: Returns list of pending and completed FDR release clearance requests across governance tiers.
+      operationId: listReleaseRequests
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 20
+        - name: status
+          in: query
+          schema:
+            $ref: '#/components/schemas/FDRStatus'
+        - name: regional_office_status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ApprovalStatus'
+        - name: hq_finance_status
+          in: query
+          schema:
+            $ref: '#/components/schemas/ApprovalStatus'
+      responses:
+        '200':
+          description: Paginated release requests list.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseRequestListResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+    post:
+      tags:
+        - Release & Clearance Workflow
+      summary: Submit Institutional FDR Release Request
+      description: Initiates formal release request linking mandatory legal documents (Affidavit 6, State DTE NOC, Faculty No Dues).
+      operationId: createReleaseRequest
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ReleaseRequestCreate'
+      responses:
+        '201':
+          description: Release request registered.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /release-requests/{id}:
+    get:
+      tags:
+        - Release & Clearance Workflow
+      summary: Retrieve Release Request Details
+      description: Fetches complete release application including all three statutory clearance documents and multi-tier approval trail.
+      operationId: getReleaseRequestById
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Release request detail retrieved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /release-requests/{id}/verify-affidavit:
+    post:
+      tags:
+        - Release & Clearance Workflow
+      summary: Validate Affidavit 6 & Supporting Clearances
+      description: Verifies notary stamp, judicial stamp paper value, and legal text compliance of Affidavit 6.
+      operationId: verifyAffidavitClearance
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/AffidavitVerificationRequest'
+      responses:
+        '200':
+          description: Affidavit verification evaluated.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AffidavitVerificationResult'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /release-requests/{id}/approve:
+    post:
+      tags:
+        - Release & Clearance Workflow
+      summary: Multi-Tier Approval Decision
+      description: Submits approval, rejection, or query from Regional Officer (Level 1), HQ Finance (Level 2), or Member Secretary (Level 3).
+      operationId: approveReleaseRequest
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApprovalDecisionRequest'
+      responses:
+        '200':
+          description: Approval status registered and workflow advanced.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /release-requests/{id}/pfms-disburse:
+    post:
+      tags:
+        - Release & Clearance Workflow
+      summary: Disburse Approved Funds via PFMS Treasury Bridge
+      description: AICTE HQ Finance triggers or records Public Financial Management System (PFMS) electronic disbursement advice.
+      operationId: disbursePFMSFunds
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/PFMSDisbursementRequest'
+      responses:
+        '200':
+          description: PFMS disbursement recorded; FDR finalized as RELEASED.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ReleaseRequest'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /audit/logs:
+    get:
+      tags:
+        - Immutable Audit
+      summary: Query Tamper-Evident Transactional Audit Trail
+      description: Returns cryptographically chained audit events filtered by entity type, entity ID, actor, or date window.
+      operationId: queryAuditLogs
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: entity_type
+          in: query
+          schema:
+            type: string
+            example: fdrs
+        - name: entity_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: actor_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: from_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to_date
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Paginated audit ledger entries.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AuditLogResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+  /audit/verify-chain/{id}:
+    get:
+      tags:
+        - Immutable Audit
+      summary: Cryptographically Verify SHA-256 Hash Chain
+      description: Traverses backward and forward hash linkages starting from genesis up to the specified record, proving no tampering has occurred.
+      operationId: verifyAuditChain
+      security:
+        - BearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          description: Ledger entry ID to verify.
+          schema:
+            type: integer
+      responses:
+        '200':
+          description: Cryptographic integrity verification report.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ChainVerificationResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '500':
+          $ref: '#/components/responses/InternalServerError'
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: Standard JSON Web Token (RFC 7519) issued upon authentication.
+    ApiKeyAuth:
+      type: apiKey
+      in: header
+      name: X-Bank-API-Key
+      description: Mutual API key issued to scheduled commercial banks and CBS gateways.
+    DigitalSignature:
+      type: apiKey
+      in: header
+      name: X-Digital-Signature
+      description: RSA-SHA256 or ECDSA cryptographic signature of payload by bank nodal officer or NeSL.
+
+  responses:
+    BadRequest:
+      description: The request contains malformed syntax, missing required fields, or validation violations.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+          example:
+            type: https://fdr.aicte-india.org/errors/bad-request
+            title: Bad Request
+            status: 400
+            detail: The PAN provided does not adhere to the statutory Indian Income Tax pattern.
+            instance: /api/v1/institutions
+            invalid_params:
+              - name: pan
+                reason: PAN must match regex ^[A-Z]{5}[0-9]{4}[A-Z]{1}$
+            timestamp: '2026-10-28T18:00:00Z'
+    Unauthorized:
+      description: Authentication credentials are missing or invalid.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    Forbidden:
+      description: Subject lacks sufficient RBAC privileges to access the requested resource.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    NotFound:
+      description: Target resource was not found.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    Conflict:
+      description: The resource violates a database uniqueness constraint or state precondition.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    UnprocessableEntity:
+      description: Semantic error during business rule execution or document forensic analysis.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+    InternalServerError:
+      description: An unhandled internal server error occurred within the portal.
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/ProblemDetails'
+
+  schemas:
+    ProblemDetails:
+      type: object
+      description: Standard RFC 7807 Problem Details representation for HTTP APIs.
+      required:
+        - type
+        - title
+        - status
+        - detail
+        - instance
+        - timestamp
+      properties:
+        type:
+          type: string
+          format: uri
+          example: https://fdr.aicte-india.org/errors/validation-error
+        title:
+          type: string
+          example: Validation Error
+        status:
+          type: integer
+          example: 400
+        detail:
+          type: string
+          example: Invalid input parameters provided.
+        instance:
+          type: string
+          example: /api/v1/fdrs
+        invalid_params:
+          type: array
+          items:
+            type: object
+            required:
+              - name
+              - reason
+            properties:
+              name:
+                type: string
+                example: principal_amount
+              reason:
+                type: string
+                example: Principal amount must be greater than zero.
+        timestamp:
+          type: string
+          format: date-time
+          example: '2026-10-28T18:15:30Z'
+
+    InstitutionType:
+      type: string
+      enum:
+        - CENTRAL_UNIVERSITY
+        - STATE_UNIVERSITY
+        - DEEMED_UNIVERSITY
+        - GOVERNMENT
+        - GOVERNMENT_AIDED
+        - SELF_FINANCED_PRIVATE
+        - STANDALONE_INSTITUTE
+      example: SELF_FINANCED_PRIVATE
+
+    BankTier:
+      type: string
+      enum:
+        - PUBLIC_SECTOR_SCHEDULED
+        - PRIVATE_SCHEDULED
+        - FOREIGN_SCHEDULED
+        - REGIONAL_RURAL
+        - NON_SCHEDULED
+      example: PUBLIC_SECTOR_SCHEDULED
+
+    FDRStatus:
+      type: string
+      enum:
+        - DRAFT
+        - SUBMITTED
+        - PENDING_BANK_VERIFICATION
+        - ACTIVE
+        - MATURED
+        - RENEWAL_REQUESTED
+        - ROLLOVER_IN_PROGRESS
+        - RELEASE_REQUESTED
+        - RELEASED
+        - LIQUIDATED_BY_AICTE
+        - REJECTED
+      example: ACTIVE
+
+    LienStatus:
+      type: string
+      enum:
+        - NOT_MARKED
+        - LIEN_REQUESTED
+        - LIEN_CONFIRMED
+        - LIEN_REVOKED
+        - LIEN_INVOKED
+      example: LIEN_CONFIRMED
+
+    DocumentType:
+      type: string
+      enum:
+        - FDR_RECEIPT
+        - BANK_CONFIRMATION_LETTER
+        - LIEN_ACKNOWLEDGEMENT
+        - AFFIDAVIT_6
+        - STATE_DTE_NO_OBJECTION
+        - FACULTY_SALARY_CLEARANCE
+        - COURT_ORDER
+        - PFMS_DISBURSEMENT_ADVICE
+      example: FDR_RECEIPT
+
+    ApprovalStatus:
+      type: string
+      enum:
+        - PENDING
+        - APPROVED
+        - REJECTED
+        - QUERY_RAISED
+        - ESCALATED
+      example: PENDING
+
+    EscalationLevel:
+      type: string
+      enum:
+        - L1_REGIONAL_OFFICE
+        - L2_HQ_FINANCE
+        - L3_ADVISER_APPROVAL
+        - L4_MEMBER_SECRETARY
+      example: L1_REGIONAL_OFFICE
+
+    AuditAction:
+      type: string
+      enum:
+        - INSERT
+        - UPDATE
+        - DELETE
+        - VERIFY_OCR
+        - MARK_LIEN
+        - REVOKE_LIEN
+        - APPROVE_RELEASE
+        - DISBURSE_PFMS
+        - ROLLOVER_INITIATED
+        - TAMPER_ALERT
+      example: MARK_LIEN
+
+    AlertChannel:
+      type: string
+      enum:
+        - EMAIL
+        - SMS
+        - WHATSAPP
+        - PORTAL_DASHBOARD
+        - API_WEBHOOK
+      example: EMAIL
+
+    AlertDispatchStatus:
+      type: string
+      enum:
+        - PENDING
+        - SENT
+        - FAILED
+        - ACKNOWLEDGED
+      example: SENT
+
+    LoginRequest:
+      type: object
+      required:
+        - identifier
+        - password
+      properties:
+        identifier:
+          type: string
+          description: AICTE Permanent ID, registered email, or bank nodal officer username.
+          example: 1-109283741
+        password:
+          type: string
+          format: password
+          example: StrongP@ssw0rd2026!
+
+    AuthTokenResponse:
+      type: object
+      required:
+        - access_token
+        - token_type
+        - expires_in
+      properties:
+        access_token:
+          type: string
+          example: eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9...
+        refresh_token:
+          type: string
+          example: 9b2d89df8e1b4c91a34...
+        token_type:
+          type: string
+          example: Bearer
+        expires_in:
+          type: integer
+          description: Seconds until expiration.
+          example: 3600
+        mfa_required:
+          type: boolean
+          example: false
+        mfa_session_id:
+          type: string
+          example: mfa-sess-8942-abcd
+        user_profile:
+          type: object
+          properties:
+            user_id:
+              type: string
+              format: uuid
+            name:
+              type: string
+              example: Dr. A. K. Sharma
+            role:
+              type: string
+              example: regional_officer
+            regional_office_id:
+              type: string
+              example: RO_NORTH_WEST_CHANDIGARH
+
+    RefreshTokenRequest:
+      type: object
+      required:
+        - refresh_token
+      properties:
+        refresh_token:
+          type: string
+          example: 9b2d89df8e1b4c91a34...
+
+    MFAVerifyRequest:
+      type: object
+      required:
+        - mfa_session_id
+        - code
+      properties:
+        mfa_session_id:
+          type: string
+          example: mfa-sess-8942-abcd
+        code:
+          type: string
+          pattern: '^[0-9]{6}$'
+          example: '629145'
+
+    ContactDetails:
+      type: object
+      required:
+        - principal_name
+        - principal_email
+        - principal_mobile
+        - office_address
+      properties:
+        principal_name:
+          type: string
+          example: Dr. Rajesh Kumar Verma
+        principal_email:
+          type: string
+          format: email
+          example: principal@engineering-delhi.edu.in
+        principal_mobile:
+          type: string
+          example: '+919876543210'
+        alternate_contact:
+          type: string
+          example: '+911123456789'
+        office_address:
+          type: string
+          example: Plot 4, Institutional Area, Phase II, New Delhi 110070
+
+    Institution:
+      type: object
+      required:
+        - id
+        - aicte_permanent_id
+        - name
+        - institution_type
+        - trust_society_name
+        - state
+        - regional_office_id
+        - pan
+        - contact_details
+        - is_active
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        aicte_permanent_id:
+          type: string
+          example: 1-109283741
+        name:
+          type: string
+          example: Delhi Institute of Technology & Advanced Engineering
+        institution_type:
+          $ref: '#/components/schemas/InstitutionType'
+        trust_society_name:
+          type: string
+          example: Educational Excellence Society of India
+        state:
+          type: string
+          example: Delhi
+        regional_office_id:
+          type: string
+          example: RO_NORTH_WEST_CHANDIGARH
+        pan:
+          type: string
+          example: AAATE1234F
+        gstin:
+          type: string
+          example: 07AAATE1234F1Z5
+        contact_details:
+          $ref: '#/components/schemas/ContactDetails'
+        is_active:
+          type: boolean
+          example: true
+        total_fdrs_count:
+          type: integer
+          example: 3
+        total_active_deposit_amount:
+          type: number
+          format: double
+          example: 3500000.00
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    InstitutionCreate:
+      type: object
+      required:
+        - aicte_permanent_id
+        - name
+        - institution_type
+        - trust_society_name
+        - state
+        - regional_office_id
+        - pan
+        - contact_details
+      properties:
+        aicte_permanent_id:
+          type: string
+          example: 1-109283741
+        name:
+          type: string
+          example: Delhi Institute of Technology & Advanced Engineering
+        institution_type:
+          $ref: '#/components/schemas/InstitutionType'
+        trust_society_name:
+          type: string
+          example: Educational Excellence Society of India
+        state:
+          type: string
+          example: Delhi
+        regional_office_id:
+          type: string
+          example: RO_NORTH_WEST_CHANDIGARH
+        pan:
+          type: string
+          pattern: '^[A-Z]{5}[0-9]{4}[A-Z]{1}$'
+          example: AAATE1234F
+        gstin:
+          type: string
+          pattern: '^[0-9]{2}[A-Z]{5}[0-9]{4}[A-Z]{1}[1-9A-Z]{1}Z[0-9A-Z]{1}$'
+          example: 07AAATE1234F1Z5
+        contact_details:
+          $ref: '#/components/schemas/ContactDetails'
+
+    InstitutionUpdate:
+      type: object
+      properties:
+        name:
+          type: string
+        trust_society_name:
+          type: string
+        contact_details:
+          $ref: '#/components/schemas/ContactDetails'
+        is_active:
+          type: boolean
+
+    InstitutionListResponse:
+      type: object
+      required:
+        - data
+        - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/Institution'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    PaginationMeta:
+      type: object
+      required:
+        - total_records
+        - current_page
+        - per_page
+        - total_pages
+      properties:
+        total_records:
+          type: integer
+          example: 142
+        current_page:
+          type: integer
+          example: 1
+        per_page:
+          type: integer
+          example: 20
+        total_pages:
+          type: integer
+          example: 8
+
+    Bank:
+      type: object
+      required:
+        - id
+        - bank_name
+        - bank_code
+        - ifsc_prefix
+        - bank_tier
+        - api_enabled
+        - is_scheduled_bank
+        - active
+      properties:
+        id:
+          type: string
+          format: uuid
+        bank_name:
+          type: string
+          example: State Bank of India
+        bank_code:
+          type: string
+          example: SBI
+        ifsc_prefix:
+          type: string
+          example: SBIN
+        bank_tier:
+          $ref: '#/components/schemas/BankTier'
+        api_enabled:
+          type: boolean
+          example: true
+        cbs_gateway_url:
+          type: string
+          example: https://cbs-api.sbi.co.in/aicte/v1
+        is_scheduled_bank:
+          type: boolean
+          example: true
+        active:
+          type: boolean
+          example: true
+
+    BankBranch:
+      type: object
+      required:
+        - id
+        - bank_id
+        - ifsc_code
+        - branch_name
+        - branch_address
+        - nodal_officer_email
+        - nodal_officer_mobile
+      properties:
+        id:
+          type: string
+          format: uuid
+        bank_id:
+          type: string
+          format: uuid
+        ifsc_code:
+          type: string
+          example: SBIN0001234
+        branch_name:
+          type: string
+          example: New Delhi Main Branch
+        branch_address:
+          type: string
+          example: 11 Parliament Street, New Delhi 110001
+        nodal_officer_email:
+          type: string
+          format: email
+          example: nodal.aicte@sbi.co.in
+        nodal_officer_mobile:
+          type: string
+          example: '+919412345678'
+        is_sftp_enabled:
+          type: boolean
+          example: true
+
+    FDR:
+      type: object
+      required:
+        - id
+        - institution_id
+        - bank_branch_id
+        - fdr_number
+        - principal_amount
+        - interest_rate
+        - issue_date
+        - maturity_date
+        - lock_in_years
+        - status
+        - lien_status
+        - joint_holder_name
+        - auto_renewal_flag
+        - current_balance
+        - renewal_count
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        institution_id:
+          type: string
+          format: uuid
+        bank_branch_id:
+          type: string
+          format: uuid
+        fdr_number:
+          type: string
+          example: FDR-SBI-2026-99120
+        principal_amount:
+          type: number
+          format: double
+          example: 1500000.00
+        interest_rate:
+          type: number
+          format: double
+          example: 7.25
+        issue_date:
+          type: string
+          format: date
+          example: '2026-08-15'
+        maturity_date:
+          type: string
+          format: date
+          example: '2034-08-15'
+        lock_in_years:
+          type: integer
+          example: 8
+        status:
+          $ref: '#/components/schemas/FDRStatus'
+        lien_status:
+          $ref: '#/components/schemas/LienStatus'
+        joint_holder_name:
+          type: string
+          example: Regional Officer, AICTE
+        auto_renewal_flag:
+          type: boolean
+          example: true
+        current_balance:
+          type: number
+          format: double
+          example: 1500000.00
+        maturity_amount:
+          type: number
+          format: double
+          example: 2652190.50
+        renewal_count:
+          type: integer
+          example: 0
+        parent_fdr_id:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+        branch_details:
+          $ref: '#/components/schemas/BankBranch'
+
+    FDRCreate:
+      type: object
+      required:
+        - institution_id
+        - bank_branch_id
+        - fdr_number
+        - principal_amount
+        - interest_rate
+        - issue_date
+        - maturity_date
+      properties:
+        institution_id:
+          type: string
+          format: uuid
+        bank_branch_id:
+          type: string
+          format: uuid
+        fdr_number:
+          type: string
+          example: FDR-SBI-2026-99120
+        principal_amount:
+          type: number
+          format: double
+          minimum: 10000
+          example: 1500000.00
+        interest_rate:
+          type: number
+          format: double
+          minimum: 0.0
+          maximum: 25.0
+          example: 7.25
+        issue_date:
+          type: string
+          format: date
+          example: '2026-08-15'
+        maturity_date:
+          type: string
+          format: date
+          example: '2034-08-15'
+        lock_in_years:
+          type: integer
+          default: 8
+          example: 8
+        joint_holder_name:
+          type: string
+          default: Regional Officer, AICTE
+          example: Regional Officer, AICTE
+        auto_renewal_flag:
+          type: boolean
+          default: true
+          example: true
+
+    FDRUpdate:
+      type: object
+      properties:
+        principal_amount:
+          type: number
+          format: double
+        interest_rate:
+          type: number
+          format: double
+        maturity_date:
+          type: string
+          format: date
+        auto_renewal_flag:
+          type: boolean
+
+    FDRListResponse:
+      type: object
+      required:
+        - data
+        - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/FDR'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    DocumentUploadResponse:
+      type: object
+      required:
+        - document_id
+        - fdr_id
+        - document_type
+        - s3_key
+        - file_hash_sha256
+        - file_size
+        - created_at
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        fdr_id:
+          type: string
+          format: uuid
+        document_type:
+          $ref: '#/components/schemas/DocumentType'
+        s3_key:
+          type: string
+          example: fdr-docs/2026/10/fdr-sbi-99120.pdf
+        file_hash_sha256:
+          type: string
+          example: 5e884898da28047151d0e56f8dc6292773603d0d6aabbdd62a11ef721d1542d8
+        file_size:
+          type: integer
+          example: 1482019
+        created_at:
+          type: string
+          format: date-time
+
+    OCRExtractedData:
+      type: object
+      properties:
+        fdr_number:
+          type: string
+          example: FDR-SBI-2026-99120
+        bank_name:
+          type: string
+          example: State Bank of India
+        branch_ifsc:
+          type: string
+          example: SBIN0001234
+        principal_amount:
+          type: number
+          example: 1500000.00
+        joint_holder_detected:
+          type: string
+          example: Regional Officer, AICTE
+        issue_date:
+          type: string
+          example: '2026-08-15'
+        maturity_date:
+          type: string
+          example: '2034-08-15'
+        interest_rate:
+          type: number
+          example: 7.25
+
+    OCRVerificationResult:
+      type: object
+      required:
+        - document_id
+        - ocr_confidence_score
+        - forensic_tamper_score
+        - is_tampered
+        - extracted_fields
+        - validation_match
+      properties:
+        document_id:
+          type: string
+          format: uuid
+        ocr_confidence_score:
+          type: number
+          format: double
+          example: 0.985
+        forensic_tamper_score:
+          type: number
+          format: double
+          description: Score from 0.0 (clean) to 1.0 (fraudulent).
+          example: 0.04
+        is_tampered:
+          type: boolean
+          example: false
+        extracted_fields:
+          $ref: '#/components/schemas/OCRExtractedData'
+        validation_match:
+          type: boolean
+          description: True if OCR payload exactly matches DB FDR record attributes.
+          example: true
+
+    LienRecord:
+      type: object
+      required:
+        - id
+        - fdr_id
+        - lien_reference_number
+        - lien_status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        fdr_id:
+          type: string
+          format: uuid
+        lien_reference_number:
+          type: string
+          example: LIEN-SBI-2026-44109
+        lien_marked_date:
+          type: string
+          format: date-time
+          nullable: true
+        lien_revoked_date:
+          type: string
+          format: date-time
+          nullable: true
+        lien_status:
+          $ref: '#/components/schemas/LienStatus'
+        bank_acknowledgement_doc_id:
+          type: string
+          format: uuid
+          nullable: true
+        nesl_transaction_id:
+          type: string
+          example: NESL-TX-99021-X
+        remarks:
+          type: string
+          example: Pledged unconditionally in favor of Member Secretary / Regional Officer AICTE.
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    LienConfirmationRequest:
+      type: object
+      required:
+        - lien_reference_number
+        - nesl_transaction_id
+      properties:
+        lien_reference_number:
+          type: string
+          example: LIEN-SBI-2026-44109
+        nesl_transaction_id:
+          type: string
+          example: NESL-TX-99021-X
+        bank_acknowledgement_doc_id:
+          type: string
+          format: uuid
+        remarks:
+          type: string
+          example: Verified through NeSL Information Utility gateway.
+
+    CBSVerificationRequest:
+      type: object
+      required:
+        - ifsc_code
+        - fdr_number
+        - principal_amount
+      properties:
+        ifsc_code:
+          type: string
+          pattern: '^[A-Z]{4}0[A-Z0-9]{6}$'
+          example: SBIN0001234
+        fdr_number:
+          type: string
+          example: FDR-SBI-2026-99120
+        principal_amount:
+          type: number
+          example: 1500000.00
+
+    CBSVerificationResponse:
+      type: object
+      required:
+        - verified
+        - cbs_account_status
+        - cbs_balance
+        - joint_name_matches
+        - lien_marked_on_cbs
+      properties:
+        verified:
+          type: boolean
+          example: true
+        cbs_account_status:
+          type: string
+          example: ACTIVE_LOCKED
+        cbs_balance:
+          type: number
+          example: 1500000.00
+        joint_name_matches:
+          type: boolean
+          example: true
+        lien_marked_on_cbs:
+          type: boolean
+          example: true
+        maturity_date:
+          type: string
+          format: date
+          example: '2034-08-15'
+
+    CBSMarkLienRequest:
+      type: object
+      required:
+        - fdr_id
+        - fdr_number
+        - ifsc_code
+        - mandate_authority
+      properties:
+        fdr_id:
+          type: string
+          format: uuid
+        fdr_number:
+          type: string
+          example: FDR-SBI-2026-99120
+        ifsc_code:
+          type: string
+          example: SBIN0001234
+        mandate_authority:
+          type: string
+          example: AICTE Regional Office Mandate Ref RO-NW-2026-FDR-01
+
+    CBSCallbackPayload:
+      type: object
+      required:
+        - fdr_number
+        - ifsc_code
+        - lien_status
+        - lien_reference_number
+        - timestamp
+      properties:
+        fdr_number:
+          type: string
+          example: FDR-SBI-2026-99120
+        ifsc_code:
+          type: string
+          example: SBIN0001234
+        lien_status:
+          $ref: '#/components/schemas/LienStatus'
+        lien_reference_number:
+          type: string
+          example: LIEN-SBI-2026-44109
+        nesl_transaction_id:
+          type: string
+          example: NESL-TX-99021-X
+        timestamp:
+          type: string
+          format: date-time
+          example: '2026-10-28T18:22:15Z'
+
+    NodalSignOffRequest:
+      type: object
+      required:
+        - fdr_id
+        - nodal_officer_name
+        - nodal_officer_emp_code
+        - remarks
+      properties:
+        fdr_id:
+          type: string
+          format: uuid
+        nodal_officer_name:
+          type: string
+          example: Sudhir Mehta, Chief Manager
+        nodal_officer_emp_code:
+          type: string
+          example: SBI-EMP-88219
+        remarks:
+          type: string
+          example: Confirmed lien marked on CBS screen 7004. Lien valid till AICTE release.
+
+    MaturityAlert:
+      type: object
+      required:
+        - id
+        - fdr_id
+        - alert_type
+        - trigger_date
+        - target_recipient
+        - channel
+        - dispatch_status
+        - escalation_level
+        - created_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        fdr_id:
+          type: string
+          format: uuid
+        alert_type:
+          type: string
+          example: T_MINUS_90
+        trigger_date:
+          type: string
+          format: date
+          example: '2034-05-15'
+        target_recipient:
+          type: string
+          example: principal@engineering-delhi.edu.in
+        channel:
+          $ref: '#/components/schemas/AlertChannel'
+        dispatch_status:
+          $ref: '#/components/schemas/AlertDispatchStatus'
+        escalation_level:
+          $ref: '#/components/schemas/EscalationLevel'
+        dispatch_timestamp:
+          type: string
+          format: date-time
+        retry_count:
+          type: integer
+          example: 0
+        failure_reason:
+          type: string
+          nullable: true
+        acknowledged_at:
+          type: string
+          format: date-time
+          nullable: true
+        acknowledged_by:
+          type: string
+          format: uuid
+          nullable: true
+        created_at:
+          type: string
+          format: date-time
+
+    MaturityDashboardResponse:
+      type: object
+      required:
+        - metrics
+        - upcoming_alerts
+      properties:
+        metrics:
+          type: object
+          properties:
+            t_minus_90_count:
+              type: integer
+              example: 48
+            t_minus_60_count:
+              type: integer
+              example: 22
+            t_minus_30_count:
+              type: integer
+              example: 15
+            t_minus_7_count:
+              type: integer
+              example: 6
+            overdue_count:
+              type: integer
+              example: 2
+            total_maturing_value_inr:
+              type: number
+              example: 85200000.00
+        upcoming_alerts:
+          type: array
+          items:
+            $ref: '#/components/schemas/MaturityAlert'
+
+    AlertAckRequest:
+      type: object
+      required:
+        - action_taken
+      properties:
+        action_taken:
+          type: string
+          enum:
+            - ROLLOVER_SCHEDULED
+            - RELEASE_INITIATED
+            - CONTACTED_INSTITUTION
+            - ESCALATED_TO_HQ
+          example: ROLLOVER_SCHEDULED
+        remarks:
+          type: string
+          example: Institution confirmed intent to auto-renew deposit for another 8-year block.
+
+    RolloverRequest:
+      type: object
+      required:
+        - new_tenure_years
+        - auto_renewal_flag
+      properties:
+        new_tenure_years:
+          type: integer
+          minimum: 1
+          maximum: 25
+          example: 8
+        auto_renewal_flag:
+          type: boolean
+          example: true
+        revised_interest_rate:
+          type: number
+          format: double
+          example: 7.50
+
+    ReleaseRequest:
+      type: object
+      required:
+        - id
+        - fdr_id
+        - request_number
+        - reason
+        - affidavit6_doc_id
+        - no_dues_state_dte_doc_id
+        - no_dues_faculty_doc_id
+        - regional_office_status
+        - hq_finance_status
+        - member_secretary_status
+        - status
+        - created_at
+        - updated_at
+      properties:
+        id:
+          type: string
+          format: uuid
+        fdr_id:
+          type: string
+          format: uuid
+        request_number:
+          type: string
+          example: REL-2026-00491
+        reason:
+          type: string
+          example: Statutory 8-year lock-in period successfully concluded. Institute operating in full compliance.
+        affidavit6_doc_id:
+          type: string
+          format: uuid
+        no_dues_state_dte_doc_id:
+          type: string
+          format: uuid
+        no_dues_faculty_doc_id:
+          type: string
+          format: uuid
+        regional_office_status:
+          $ref: '#/components/schemas/ApprovalStatus'
+        regional_office_remarks:
+          type: string
+          example: Campus verification completed. No pending student complaints or fee disputes.
+        regional_officer_id:
+          type: string
+          format: uuid
+        regional_office_action_at:
+          type: string
+          format: date-time
+        hq_finance_status:
+          $ref: '#/components/schemas/ApprovalStatus'
+        hq_finance_remarks:
+          type: string
+          example: Accounts audited. Verified no outstanding penal penalties or recoveries.
+        hq_finance_officer_id:
+          type: string
+          format: uuid
+        hq_finance_action_at:
+          type: string
+          format: date-time
+        member_secretary_status:
+          $ref: '#/components/schemas/ApprovalStatus'
+        member_secretary_remarks:
+          type: string
+          example: Approved under AICTE Approval Process Handbook regulations.
+        member_secretary_id:
+          type: string
+          format: uuid
+        member_secretary_action_at:
+          type: string
+          format: date-time
+        pfms_payment_ref:
+          type: string
+          example: PFMS-2026-DISB-77192
+        amount_approved:
+          type: number
+          format: double
+          example: 1500000.00
+        status:
+          $ref: '#/components/schemas/FDRStatus'
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ReleaseRequestCreate:
+      type: object
+      required:
+        - fdr_id
+        - reason
+        - affidavit6_doc_id
+        - no_dues_state_dte_doc_id
+        - no_dues_faculty_doc_id
+      properties:
+        fdr_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+          example: Completion of 8-year lock-in period. Zero dues to faculty and university.
+        affidavit6_doc_id:
+          type: string
+          format: uuid
+        no_dues_state_dte_doc_id:
+          type: string
+          format: uuid
+        no_dues_faculty_doc_id:
+          type: string
+          format: uuid
+
+    ReleaseRequestListResponse:
+      type: object
+      required:
+        - data
+        - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/ReleaseRequest'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    AffidavitVerificationRequest:
+      type: object
+      required:
+        - affidavit_doc_id
+        - stamp_paper_number
+        - notary_registration_number
+      properties:
+        affidavit_doc_id:
+          type: string
+          format: uuid
+        stamp_paper_number:
+          type: string
+          example: IN-DL99823104928192U
+        notary_registration_number:
+          type: string
+          example: NOTARY-DEL-5510-2024
+
+    AffidavitVerificationResult:
+      type: object
+      required:
+        - affidavit_valid
+        - stamp_paper_verified
+        - notary_verified
+        - text_clauses_compliant
+        - fraud_tamper_score
+      properties:
+        affidavit_valid:
+          type: boolean
+          example: true
+        stamp_paper_verified:
+          type: boolean
+          example: true
+        notary_verified:
+          type: boolean
+          example: true
+        text_clauses_compliant:
+          type: boolean
+          example: true
+        fraud_tamper_score:
+          type: number
+          example: 0.02
+
+    ApprovalDecisionRequest:
+      type: object
+      required:
+        - decision
+        - remarks
+      properties:
+        decision:
+          $ref: '#/components/schemas/ApprovalStatus'
+        remarks:
+          type: string
+          example: Inspected all NOC documents and confirmed AICTE portal compliance. Recommended for release.
+        recommended_amount:
+          type: number
+          format: double
+          example: 1500000.00
+
+    PFMSDisbursementRequest:
+      type: object
+      required:
+        - pfms_payment_ref
+        - disbursement_date
+        - amount_disbursed
+        - beneficiary_account_number
+        - beneficiary_ifsc
+      properties:
+        pfms_payment_ref:
+          type: string
+          example: PFMS-2026-DISB-77192
+        disbursement_date:
+          type: string
+          format: date
+          example: '2026-10-28'
+        amount_disbursed:
+          type: number
+          format: double
+          example: 1500000.00
+        beneficiary_account_number:
+          type: string
+          example: '918020019283741'
+        beneficiary_ifsc:
+          type: string
+          example: SBIN0001234
+
+    AuditLedgerEntry:
+      type: object
+      required:
+        - id
+        - entity_type
+        - entity_id
+        - action
+        - actor_id
+        - actor_role
+        - ip_address
+        - prev_record_hash
+        - current_hash
+        - created_at
+      properties:
+        id:
+          type: integer
+          example: 104928
+        entity_type:
+          type: string
+          example: fdrs
+        entity_id:
+          type: string
+          format: uuid
+        action:
+          $ref: '#/components/schemas/AuditAction'
+        actor_id:
+          type: string
+          format: uuid
+        actor_role:
+          type: string
+          example: regional_officer
+        ip_address:
+          type: string
+          example: 164.100.24.55
+        user_agent:
+          type: string
+          example: Mozilla/5.0 (Windows NT 10.0; Win64; x64)
+        state_before:
+          type: object
+          nullable: true
+        state_after:
+          type: object
+          nullable: true
+        prev_record_hash:
+          type: string
+          example: 3b9a0224be674cf3a0c77443ee9e55a820c75ce492c89dbf5c3a4f6cf7ecbc36
+        current_hash:
+          type: string
+          example: 7f83b1657ff1fc53b92dc18148a1d65dfc2d4b1fa3d677284addd200126d9069
+        signature:
+          type: string
+          nullable: true
+          example: MEQCIG7W3+...
+        created_at:
+          type: string
+          format: date-time
+
+    AuditLogResponse:
+      type: object
+      required:
+        - data
+        - meta
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLedgerEntry'
+        meta:
+          $ref: '#/components/schemas/PaginationMeta'
+
+    ChainVerificationResponse:
+      type: object
+      required:
+        - is_valid
+        - records_checked
+        - target_record_id
+        - hash_match
+        - linkage_intact
+        - message
+      properties:
+        is_valid:
+          type: boolean
+          example: true
+        records_checked:
+          type: integer
+          example: 104928
+        target_record_id:
+          type: integer
+          example: 104928
+        hash_match:
+          type: boolean
+          example: true
+        linkage_intact:
+          type: boolean
+          example: true
+        failed_at_id:
+          type: integer
+          nullable: true
+          example: null
+        message:
+          type: string
+          example: Audit ledger hash chain is cryptographically intact and unbroken.
